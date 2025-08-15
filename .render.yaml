@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: mood-api
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --timeout 120 --workers 1 --threads 8
+    envVars:
+      - key: MODEL_PATH
+        value: models/facial_emotion_detection_model.h5
+      # - key: MODEL_URL
+      #   value: https://your-storage/fer_model.h5
