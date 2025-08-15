@@ -10,12 +10,8 @@ CLASS_NAMES = ['angry','disgust','fear','happy','neutral','sad','surprise']
 app = Flask(__name__)
 CORS(app)
 
-# ---------- TFLite load ----------
-# Prefer tflite-runtime; fall back to TF if needed.
-try:
-    from tflite_runtime.interpreter import Interpreter
-except ImportError:
-    from tensorflow.lite import Interpreter  # fallback
+from tensorflow.lite import Interpreter
+
 
 _interpreter = None
 _input_details = None
