@@ -1,45 +1,60 @@
-import os
+import os, base64, numpy as np, cv2, threading
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import numpy as np, base64, cv2
-from tensorflow.keras.models import load_model
 
+# ---------- Config ----------
+MODEL_PATH = os.environ.get("MODEL_PATH", "models/model_drq.tflite")
+CLASS_NAMES = ['angry','disgust','fear','happy','neutral','sad','surprise']
+
+# ---------- App ----------
 app = Flask(__name__)
 CORS(app)
 
-MODEL_PATH = os.environ.get("MODEL_PATH", "models/facial_emotion_detection_model.h5")
+# ---------- TFLite load ----------
+# Prefer tflite-runtime; fall back to TF if needed.
+try:
+    from tflite_runtime.interpreter import Interpreter
+except ImportError:
+    from tensorflow.lite import Interpreter  # fallback
 
-def ensure_model():
-    # If you want to download from cloud at boot, put that logic here
-    # e.g., from an S3/Drive URL in env MODEL_URL
-    # Example:
-    # import requests
-    # url = os.environ.get("MODEL_URL")
-    # if url and not os.path.exists(MODEL_PATH):
-    #     os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
-    #     with requests.get(url, stream=True) as r:
-    #         r.raise_for_status()
-    #         with open(MODEL_PATH, "wb") as f:
-    #             for chunk in r.iter_content(chunk_size=8192):
-    #                 f.write(chunk)
-    pass
+_interpreter = None
+_input_details = None
+_output_details = None
+_infer_lock = threading.Lock()
 
-ensure_model()
-model = load_model(MODEL_PATH)
-class_names = ['angry','disgust','fear','happy','neutral','sad','surprise']
+def load_interpreter():
+    global _interpreter, _input_details, _output_details
+    _interpreter = Interpreter(model_path=MODEL_PATH)
+    _interpreter.allocate_tensors()
+    _input_details = _interpreter.get_input_details()
+    _output_details = _interpreter.get_output_details()
 
-def preprocess_image(img_b64):
+def warmup():
+    # Warm the model once to avoid first-request lag
+    dummy = np.zeros((1,48,48,1), dtype=np.float32)
+    with _infer_lock:
+        _interpreter.set_tensor(_input_details[0]['index'], dummy)
+        _interpreter.invoke()
+        _interpreter.get_tensor(_output_details[0]['index'])
+
+load_interpreter()
+warmup()
+
+# ---------- Utils ----------
+def preprocess_image(img_b64: str) -> np.ndarray:
     if img_b64.startswith("data:image"):
         img_b64 = img_b64.split(",", 1)[1]
     img_data = base64.b64decode(img_b64)
     np_arr = np.frombuffer(img_data, np.uint8)
     img = cv2.imdecode(np_arr, cv2.IMREAD_GRAYSCALE)
     if img is None:
-        raise ValueError("Could not decode base64 image")
-    img = cv2.resize(img, (48, 48)) / 255.0
+        raise ValueError("Could not decode base64 image.")
+    # Resize & normalize
+    img = cv2.resize(img, (48, 48)).astype("float32") / 255.0
     img = np.expand_dims(img, axis=(0, -1))  # (1,48,48,1)
     return img
 
+# ---------- Routes ----------
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -51,16 +66,20 @@ def predict():
         img_b64 = data.get("image")
         if not img_b64:
             return jsonify({"error": "No image provided"}), 400
+
         arr = preprocess_image(img_b64)
-        pred = model.predict(arr)
-        idx = int(np.argmax(pred))
-        return jsonify({
-            "emotion": class_names[idx],
-            "confidence": round(float(pred[0][idx])*100, 2)
-        })
+
+        with _infer_lock:
+            _interpreter.set_tensor(_input_details[0]['index'], arr)
+            _interpreter.invoke()
+            probs = _interpreter.get_tensor(_output_details[0]['index'])
+
+        idx = int(np.argmax(probs[0]))
+        conf = float(probs[0][idx]) * 100.0
+        return jsonify({"emotion": CLASS_NAMES[idx], "confidence": round(conf, 2)})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=port)
